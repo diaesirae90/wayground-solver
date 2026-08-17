@@ -9,9 +9,7 @@ import streamlit as st
 st.set_page_config(page_title="Quiz Solver App", page_icon="📝", layout="centered")
 
 st.title("📝 Quiz Solver")
-st.caption(
-    "Mendukung Link Live (`?gc=...`), Link Solo (`/join/game/U2Fsd...`), atau 6 Digit Game PIN."
-)
+st.caption("Mendukung Game PIN (contoh: 285477), Link Live, dan Solo Game.")
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
@@ -29,109 +27,109 @@ def clean_text(raw_html: str) -> str:
     return re.sub(r"<.*?>", "", raw_html).strip()
 
 
-def parse_input_target(raw_input: str) -> dict:
-    """Mendeteksi apakah input berupa Game Code (GC) atau Token Solo (AES)."""
+def parse_clean_code(raw_input: str) -> str:
     decoded = urllib.parse.unquote(urllib.parse.unquote(raw_input.strip()))
-
-    # 1. Cek Game Code (?gc=052116 atau 6 digit angka murni)
     match_gc = re.search(r"gc=([0-9a-zA-Z]+)", decoded)
     if match_gc:
-        return {"type": "gc", "value": match_gc.group(1)}
-
-    if decoded.isdigit() and len(decoded) in [6, 7, 8]:
-        return {"type": "gc", "value": decoded}
-
-    # 2. Cek Token Solo /join/game/U2Fsd...
-    match_solo = re.search(r"/join/game/([^?&#]+)", decoded)
-    if match_solo:
-        return {"type": "solo", "value": match_solo.group(1)}
-
-    if decoded.startswith("U2Fsd"):
-        return {"type": "solo", "value": decoded}
-
-    # 3. Fallback sebagai string biasa
-    return {"type": "raw", "value": decoded}
+        return match_gc.group(1)
+    match_game = re.search(r"/join/game/([^?&#]+)", decoded)
+    if match_game:
+        return match_game.group(1)
+    match_pin = re.search(r"\b(\d{6,8})\b", decoded)
+    if match_pin:
+        return match_pin.group(1)
+    return decoded
 
 
 def get_quiz_questions(raw_input: str) -> dict:
-    target = parse_input_target(raw_input)
-    val = target["value"]
+    code = parse_clean_code(raw_input)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Content-Type": "application/json",
         "Origin": "https://wayground.com",
         "Referer": "https://wayground.com/",
     }
 
-    # Jalur 1: Sesi Solo Mode (U2Fsd...)
-    if target["type"] == "solo":
-        # Coba endpoint soloJoin
+    domains = ["https://wayground.com", "https://quizizz.com"]
+
+    # 1. Cek Room lewat checkRoom (Game PIN / Room Code)
+    room_hash = None
+    for domain in domains:
         try:
             res = requests.post(
-                "https://wayground.com/play-api/v4/soloJoin",
-                json={"game": val},
+                f"{domain}/play-api/v5/checkRoom",
+                json={"roomCode": code},
                 headers=headers,
                 timeout=10,
             )
             if res.status_code == 200:
-                quiz_id = res.json().get("quizId") or res.json().get("data", {}).get("quizId")
-                if quiz_id:
-                    q_res = requests.get(
-                        f"https://wayground.com/api/main/quiz/{quiz_id}",
-                        headers=headers,
-                        timeout=10,
-                    )
-                    questions = q_res.json().get("data", {}).get("quiz", {}).get("info", {}).get("questions")
-                    if questions:
-                        return {q.get("_id", str(i)): q for i, q in enumerate(questions)}
-        except Exception:
-            pass
-
-    # Jalur 2: Sesi Live Game / PIN / checkRoom
-    try:
-        payloads = [{"roomCode": val}, {"roomHash": val}]
-        for payload in payloads:
-            res = requests.post(
-                "https://wayground.com/play-api/v5/checkRoom",
-                json=payload,
-                headers=headers,
-                timeout=10,
-            )
-            if res.status_code == 200:
-                body = res.json()
-                questions = body.get("room", {}).get("questions")
+                data = res.json()
+                questions = data.get("room", {}).get("questions")
                 if questions:
                     return questions
+                room_hash = data.get("room", {}).get("hash")
+                if room_hash:
+                    break
+        except Exception:
+            continue
 
-                r_hash = body.get("room", {}).get("hash")
-                if r_hash:
-                    res_game = requests.get(
-                        f"https://wayground.com/_gameapi/main/public/v1/students/games/{r_hash}",
+    target_hash = room_hash or code
+
+    # 2. Ambil data dari _gameapi dengan hash ruangan
+    for domain in domains:
+        try:
+            url = f"{domain}/_gameapi/main/public/v1/students/games/{target_hash}"
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                quizzes = data.get("data", {}).get("quizzes", {})
+                if quizzes:
+                    first_key = next(iter(quizzes))
+                    questions = quizzes[first_key].get("questions", {})
+                    if questions:
+                        return questions
+
+                # Format items array
+                items = data.get("data", {}).get("items", [])
+                if items and "quizId" in items[0]:
+                    quiz_id = items[0]["quizId"]
+                    q_res = requests.get(
+                        f"{domain}/api/main/quiz/{quiz_id}",
                         headers=headers,
                         timeout=10,
                     )
-                    quizzes = res_game.json().get("data", {}).get("quizzes", {})
-                    first_key = next(iter(quizzes))
-                    return quizzes[first_key].get("questions", {})
-    except Exception:
-        pass
+                    if q_res.status_code == 200:
+                        q_data = q_res.json().get("data", {}).get("quiz", {}).get("info", {}).get("questions", [])
+                        if q_data:
+                            return {q.get("_id", str(i)): q for i, q in enumerate(q_data)}
+        except Exception:
+            continue
 
-    # Jalur 3: Direct Game API
-    try:
-        res = requests.get(
-            f"https://wayground.com/_gameapi/main/public/v1/students/games/{val}",
-            headers=headers,
-            timeout=10,
-        )
-        if res.status_code == 200:
-            quizzes = res.json().get("data", {}).get("quizzes", {})
-            if quizzes:
-                first_key = next(iter(quizzes))
-                return quizzes[first_key].get("questions", {})
-    except Exception:
-        pass
+    # 3. Cek Solo Join jika menggunakan token U2Fsd
+    if code.startswith("U2Fsd"):
+        for domain in domains:
+            try:
+                res = requests.post(
+                    f"{domain}/play-api/v4/soloJoin",
+                    json={"game": code},
+                    headers=headers,
+                    timeout=10,
+                )
+                if res.status_code == 200:
+                    quiz_id = res.json().get("quizId") or res.json().get("data", {}).get("quizId")
+                    if quiz_id:
+                        q_res = requests.get(
+                            f"{domain}/api/main/quiz/{quiz_id}",
+                            headers=headers,
+                            timeout=10,
+                        )
+                        q_list = q_res.json().get("data", {}).get("quiz", {}).get("info", {}).get("questions", [])
+                        if q_list:
+                            return {q.get("_id", str(i)): q for i, q in enumerate(q_list)}
+            except Exception:
+                continue
 
-    raise ValueError("Kuis tidak ditemukan. Pastikan kuis/ruangan game masih aktif berjalan.")
+    raise ValueError("Kuis tidak ditemukan. Pastikan sesi live masih aktif di lobi.")
 
 
 def solve_quiz(questions: dict, key: str) -> list:
@@ -157,7 +155,7 @@ def solve_quiz(questions: dict, key: str) -> list:
 
     system_instruction = """
     Kamu adalah asisten analisis kuis.
-    Analisis setiap pertanyaan dan tentukan opsi jawaban yang benar.
+    Analisis setiap pertanyaan dan pilih jawaban yang paling tepat.
     Kembalikan HANYA JSON murni berupa list objek:
     [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
     """
@@ -174,8 +172,8 @@ def solve_quiz(questions: dict, key: str) -> list:
 
 # Form Input
 user_input = st.text_input(
-    "Game PIN / Join URL / Solo Link:",
-    placeholder="Contoh: 052116 atau paste link join kuis...",
+    "Game PIN / Room Code:",
+    placeholder="Masukkan 6 digit PIN (contoh: 285477)...",
 )
 
 if st.button("Dapatkan Jawaban", type="primary", use_container_width=True):
@@ -184,9 +182,9 @@ if st.button("Dapatkan Jawaban", type="primary", use_container_width=True):
     if not api_key:
         st.error("⚠️ Masukkan Gemini API Key di sidebar.")
     elif not user_input:
-        st.warning("⚠️ Masukkan link atau PIN kuis.")
+        st.warning("⚠️ Masukkan Game PIN.")
     else:
-        with st.spinner("Mengambil soal & memproses ke AI..."):
+        with st.spinner("Mengambil soal dari live room & memproses ke AI..."):
             try:
                 questions = get_quiz_questions(user_input)
                 results = solve_quiz(questions, api_key)
