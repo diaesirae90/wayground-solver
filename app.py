@@ -5,58 +5,90 @@ import google.generativeai as genai
 import requests
 import streamlit as st
 
-# ==========================================
-# KONFIGURASI API KEY
-# ==========================================
-# Pilihan 1: Mengambil dari Streamlit Secrets / Environment Variable (Direkomendasikan)
-# Pilihan 2: Mengganti string di bawah jika ingin hardcode langsung (Kurang aman jika repo Public)
-DEFAULT_API_KEY = os.getenv("GEMINI_API_KEY", "")
-
 st.set_page_config(page_title="Quiz Solver App", page_icon="📝", layout="centered")
 
 st.title("📝 Quiz Solver")
-st.caption("Masukkan Room Hash / Kode Kuis untuk memproses jawaban via AI.")
+st.caption(
+    "Masukkan Link Join, Game PIN (misal: 052116), atau Room Hash untuk mendapatkan jawaban."
+)
 
-# Sidebar Pengaturan
 with st.sidebar:
     st.header("⚙️ Pengaturan")
     api_key_input = st.text_input(
         "Gemini API Key",
-        value=DEFAULT_API_KEY,
+        value=os.getenv("GEMINI_API_KEY", ""),
         type="password",
-        help="API Key yang digunakan untuk memproses soal.",
+        help="Masukkan Google Gemini API Key Anda.",
     )
 
 
 def clean_text(raw_html: str) -> str:
-    """Menghapus tag HTML dari teks."""
     if not raw_html:
         return ""
     return re.sub(r"<.*?>", "", raw_html).strip()
 
 
-def fetch_quiz_data(room_hash: str) -> dict:
-    """Mengambil struktur soal dari endpoint kuis."""
-    clean_id = room_hash.strip()
-    url = f"https://wayground.com/_gameapi/main/public/v1/students/games/{clean_id}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+def extract_game_code(input_str: str) -> str:
+    """Mengekstrak PIN/Game Code dari teks atau URL"""
+    input_str = input_str.strip()
+    match = re.search(r"gc=([0-9a-zA-Z]+)", input_str)
+    if match:
+        return match.group(1)
+    return input_str
 
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
-    data = response.json()
 
-    quizzes = data.get("data", {}).get("quizzes", {})
-    if not quizzes:
-        raise ValueError(
-            "Data kuis tidak ditemukan. Pastikan Room Hash/Kode valid."
-        )
+def get_quiz_data(raw_input: str) -> dict:
+    """Mengambil soal kuis baik lewat Game PIN maupun Room ID"""
+    clean_id = extract_game_code(raw_input)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Content-Type": "application/json",
+    }
 
-    first_key = next(iter(quizzes))
-    return quizzes[first_key].get("questions", {})
+    # 1. Coba ambil langsung jika formatnya Room Hash
+    try:
+        url = f"https://wayground.com/_gameapi/main/public/v1/students/games/{clean_id}"
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            quizzes = data.get("data", {}).get("quizzes", {})
+            if quizzes:
+                first_key = next(iter(quizzes))
+                return quizzes[first_key].get("questions", {})
+    except Exception:
+        pass
+
+    # 2. Coba endpoint checkRoom jika input berupa Game PIN (6 digit)
+    try:
+        check_url = "https://wayground.com/play-api/v5/checkRoom"
+        payload = {"roomCode": clean_id}
+        res = requests.post(check_url, json=payload, headers=headers, timeout=10)
+        if res.status_code == 200:
+            room_data = res.json()
+            # Cek struktur questions di response checkRoom
+            questions = room_data.get("room", {}).get(
+                "questions"
+            ) or room_data.get("questions")
+            if questions:
+                return questions
+
+            # Jika mengembalikan hash room
+            room_hash = room_data.get("room", {}).get("hash")
+            if room_hash:
+                game_url = f"https://wayground.com/_gameapi/main/public/v1/students/games/{room_hash}"
+                res_game = requests.get(game_url, headers=headers, timeout=10)
+                quizzes = res_game.json().get("data", {}).get("quizzes", {})
+                first_key = next(iter(quizzes))
+                return quizzes[first_key].get("questions", {})
+    except Exception:
+        pass
+
+    raise ValueError(
+        "Kuis tidak ditemukan. Pastikan Game PIN / Room Hash aktif dan benar."
+    )
 
 
 def solve_quiz(questions: dict, key: str) -> list:
-    """Meminta Gemini menyelesaikan soal dan mengembalikan jawaban."""
     genai.configure(api_key=key)
 
     cleaned_payload = []
@@ -77,10 +109,9 @@ def solve_quiz(questions: dict, key: str) -> list:
 
     system_instruction = """
     Kamu adalah asisten analisis kuis.
-    Analisis setiap pertanyaan beserta pilihan opsi yang tersedia.
-    Tentukan jawaban yang paling tepat.
+    Analisis setiap pertanyaan dan tentukan jawaban yang paling benar.
     Kembalikan HANYA JSON murni berupa list objek dengan format:
-    [{"question": "teks pertanyaan", "answer": "teks jawaban yang benar"}]
+    [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
     """
 
     model = genai.GenerativeModel(
@@ -93,25 +124,26 @@ def solve_quiz(questions: dict, key: str) -> list:
     return json.loads(response.text)
 
 
-# Form Input Utama
-room_hash = st.text_input(
-    "Room Hash / Code:", placeholder="Masukkan hash ruangan kuis..."
+# Form Input
+user_input = st.text_input(
+    "Game PIN / Room Code / Join URL:",
+    placeholder="Contoh: 052116 atau https://wayground.com/join?gc=052116",
 )
 
 if st.button("Dapatkan Jawaban", type="primary", use_container_width=True):
-    active_key = api_key_input.strip() or DEFAULT_API_KEY
+    api_key = api_key_input.strip()
 
-    if not active_key:
-        st.error("⚠️ API Key tidak boleh kosong.")
-    elif not room_hash:
-        st.warning("⚠️ Masukkan Room Hash terlebih dahulu.")
+    if not api_key:
+        st.error("⚠️ Masukkan Gemini API Key di menu sebelah kiri.")
+    elif not user_input:
+        st.warning("⚠️ Masukkan Game PIN atau URL kuis.")
     else:
-        with st.spinner("Mengambil data kuis & memproses ke Gemini..."):
+        with st.spinner("Mengambil soal & meminta jawaban AI..."):
             try:
-                questions = fetch_quiz_data(room_hash)
-                results = solve_quiz(questions, active_key)
+                questions = get_quiz_data(user_input)
+                results = solve_quiz(questions, api_key)
 
-                st.success(f"Berhasil memproses {len(results)} soal!")
+                st.success(f"Berhasil memuat {len(results)} soal!")
                 st.divider()
 
                 for idx, item in enumerate(results, 1):
