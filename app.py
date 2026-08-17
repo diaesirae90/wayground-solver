@@ -10,7 +10,7 @@ st.set_page_config(page_title="Quiz Solver App", page_icon="📝", layout="cente
 
 st.title("📝 Quiz Solver")
 st.caption(
-    "Mendukung Link Solo (`/join/game/U2Fsd...`), Live Game PIN, dan URL kuis."
+    "Mendukung Link Live (`?gc=...`), Link Solo (`/join/game/U2Fsd...`), atau 6 Digit Game PIN."
 )
 
 with st.sidebar:
@@ -29,46 +29,33 @@ def clean_text(raw_html: str) -> str:
     return re.sub(r"<.*?>", "", raw_html).strip()
 
 
-def parse_raw_input(raw_input: str) -> str:
-    """Mengekstrak token/kode dari URL atau teks input."""
+def parse_input_target(raw_input: str) -> dict:
+    """Mendeteksi apakah input berupa Game Code (GC) atau Token Solo (AES)."""
     decoded = urllib.parse.unquote(urllib.parse.unquote(raw_input.strip()))
 
-    # Pola 1: /join/game/U2Fsd...
-    match_game = re.search(r"/join/game/([^?&#]+)", decoded)
-    if match_game:
-        return match_game.group(1)
-
-    # Pola 2: gc=123456
+    # 1. Cek Game Code (?gc=052116 atau 6 digit angka murni)
     match_gc = re.search(r"gc=([0-9a-zA-Z]+)", decoded)
     if match_gc:
-        return match_gc.group(1)
+        return {"type": "gc", "value": match_gc.group(1)}
 
-    return decoded
+    if decoded.isdigit() and len(decoded) in [6, 7, 8]:
+        return {"type": "gc", "value": decoded}
 
+    # 2. Cek Token Solo /join/game/U2Fsd...
+    match_solo = re.search(r"/join/game/([^?&#]+)", decoded)
+    if match_solo:
+        return {"type": "solo", "value": match_solo.group(1)}
 
-def fetch_questions_by_quiz_id(quiz_id: str, headers: dict) -> dict:
-    """Mengambil detail soal berdasarkan Quiz ID."""
-    url = f"https://wayground.com/api/main/quiz/{quiz_id}"
-    res = requests.get(url, headers=headers, timeout=10)
-    if res.status_code == 200:
-        data = res.json()
-        questions = (
-            data.get("data", {})
-            .get("quiz", {})
-            .get("info", {})
-            .get("questions", [])
-        )
-        if questions:
-            return {
-                q.get("_id", str(i)): q
-                for i, q in enumerate(questions)
-            }
-    return {}
+    if decoded.startswith("U2Fsd"):
+        return {"type": "solo", "value": decoded}
+
+    # 3. Fallback sebagai string biasa
+    return {"type": "raw", "value": decoded}
 
 
-def get_quiz_data(raw_input: str) -> dict:
-    """Mengekstrak kuis dari token solo join, game code, atau hash."""
-    token_or_code = parse_raw_input(raw_input)
+def get_quiz_questions(raw_input: str) -> dict:
+    target = parse_input_target(raw_input)
+    val = target["value"]
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Content-Type": "application/json",
@@ -76,41 +63,40 @@ def get_quiz_data(raw_input: str) -> dict:
         "Referer": "https://wayground.com/",
     }
 
-    # 1. Jika token adalah enkripsi solo join (U2Fsd...)
-    if token_or_code.startswith("U2Fsd"):
+    # Jalur 1: Sesi Solo Mode (U2Fsd...)
+    if target["type"] == "solo":
         # Coba endpoint soloJoin
         try:
-            solo_url = "https://wayground.com/play-api/v4/soloJoin"
-            payload = {"game": token_or_code}
-            res = requests.post(solo_url, json=payload, headers=headers, timeout=10)
+            res = requests.post(
+                "https://wayground.com/play-api/v4/soloJoin",
+                json={"game": val},
+                headers=headers,
+                timeout=10,
+            )
             if res.status_code == 200:
-                body = res.json()
-                quiz_id = body.get("quizId") or body.get("data", {}).get("quizId")
+                quiz_id = res.json().get("quizId") or res.json().get("data", {}).get("quizId")
                 if quiz_id:
-                    questions = fetch_questions_by_quiz_id(quiz_id, headers)
+                    q_res = requests.get(
+                        f"https://wayground.com/api/main/quiz/{quiz_id}",
+                        headers=headers,
+                        timeout=10,
+                    )
+                    questions = q_res.json().get("data", {}).get("quiz", {}).get("info", {}).get("questions")
                     if questions:
-                        return questions
+                        return {q.get("_id", str(i)): q for i, q in enumerate(questions)}
         except Exception:
             pass
 
-        # Coba endpoint join v5
-        try:
-            join_url = "https://wayground.com/play-api/v5/join"
-            payload = {"roomHash": token_or_code}
-            res = requests.post(join_url, json=payload, headers=headers, timeout=10)
-            if res.status_code == 200:
-                body = res.json()
-                questions = body.get("room", {}).get("questions")
-                if questions:
-                    return questions
-        except Exception:
-            pass
-
-    # 2. Coba endpoint checkRoom (Game PIN / Room Hash standar)
+    # Jalur 2: Sesi Live Game / PIN / checkRoom
     try:
-        check_url = "https://wayground.com/play-api/v5/checkRoom"
-        for key in ["roomCode", "roomHash"]:
-            res = requests.post(check_url, json={key: token_or_code}, headers=headers, timeout=10)
+        payloads = [{"roomCode": val}, {"roomHash": val}]
+        for payload in payloads:
+            res = requests.post(
+                "https://wayground.com/play-api/v5/checkRoom",
+                json=payload,
+                headers=headers,
+                timeout=10,
+            )
             if res.status_code == 200:
                 body = res.json()
                 questions = body.get("room", {}).get("questions")
@@ -119,18 +105,24 @@ def get_quiz_data(raw_input: str) -> dict:
 
                 r_hash = body.get("room", {}).get("hash")
                 if r_hash:
-                    game_url = f"https://wayground.com/_gameapi/main/public/v1/students/games/{r_hash}"
-                    res_game = requests.get(game_url, headers=headers, timeout=10)
+                    res_game = requests.get(
+                        f"https://wayground.com/_gameapi/main/public/v1/students/games/{r_hash}",
+                        headers=headers,
+                        timeout=10,
+                    )
                     quizzes = res_game.json().get("data", {}).get("quizzes", {})
                     first_key = next(iter(quizzes))
                     return quizzes[first_key].get("questions", {})
     except Exception:
         pass
 
-    # 3. Coba endpoint student game langsung
+    # Jalur 3: Direct Game API
     try:
-        url = f"https://wayground.com/_gameapi/main/public/v1/students/games/{token_or_code}"
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(
+            f"https://wayground.com/_gameapi/main/public/v1/students/games/{val}",
+            headers=headers,
+            timeout=10,
+        )
         if res.status_code == 200:
             quizzes = res.json().get("data", {}).get("quizzes", {})
             if quizzes:
@@ -139,9 +131,7 @@ def get_quiz_data(raw_input: str) -> dict:
     except Exception:
         pass
 
-    raise ValueError(
-        "Kuis tidak ditemukan atau sesi sudah kadaluarsa. Pastikan room masih aktif."
-    )
+    raise ValueError("Kuis tidak ditemukan. Pastikan kuis/ruangan game masih aktif berjalan.")
 
 
 def solve_quiz(questions: dict, key: str) -> list:
@@ -167,9 +157,9 @@ def solve_quiz(questions: dict, key: str) -> list:
 
     system_instruction = """
     Kamu adalah asisten analisis kuis.
-    Analisis setiap pertanyaan dan opsi jawaban yang tersedia.
+    Analisis setiap pertanyaan dan tentukan opsi jawaban yang benar.
     Kembalikan HANYA JSON murni berupa list objek:
-    [{"question": "teks pertanyaan", "answer": "jawaban yang paling benar"}]
+    [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
     """
 
     model = genai.GenerativeModel(
@@ -185,32 +175,28 @@ def solve_quiz(questions: dict, key: str) -> list:
 # Form Input
 user_input = st.text_input(
     "Game PIN / Join URL / Solo Link:",
-    placeholder="Paste URL kuis atau 6 digit Game PIN...",
+    placeholder="Contoh: 052116 atau paste link join kuis...",
 )
 
 if st.button("Dapatkan Jawaban", type="primary", use_container_width=True):
     api_key = api_key_input.strip()
 
     if not api_key:
-        st.error("⚠️ Masukkan Gemini API Key di menu sebelah kiri.")
+        st.error("⚠️ Masukkan Gemini API Key di sidebar.")
     elif not user_input:
-        st.warning("⚠️ Masukkan link atau PIN kuis terlebih dahulu.")
+        st.warning("⚠️ Masukkan link atau PIN kuis.")
     else:
-        with st.spinner("Membaca data kuis & memproses AI..."):
+        with st.spinner("Mengambil soal & memproses ke AI..."):
             try:
-                questions = get_quiz_data(user_input)
+                questions = get_quiz_questions(user_input)
                 results = solve_quiz(questions, api_key)
 
                 st.success(f"Berhasil memuat {len(results)} soal!")
                 st.divider()
 
                 for idx, item in enumerate(results, 1):
-                    with st.expander(
-                        f"**{idx}. {item.get('question')}**", expanded=True
-                    ):
-                        st.markdown(
-                            f"**Jawaban:** :green[{item.get('answer')}]"
-                        )
+                    with st.expander(f"**{idx}. {item.get('question')}**", expanded=True):
+                        st.markdown(f"**Jawaban:** :green[{item.get('answer')}]")
 
             except Exception as e:
                 st.error(f"Gagal memproses kuis: {e}")
