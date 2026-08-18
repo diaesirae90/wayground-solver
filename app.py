@@ -99,23 +99,37 @@ def extract_questions_from_json(data: dict) -> tuple:
 
 
 def solve_quiz_with_ai(payload: list, key: str) -> list:
-    genai.configure(api_key=key)
+  genai.configure(api_key=key)
 
-    system_instruction = """
+  system_instruction = """
     Kamu adalah asisten penjawab kuis dan ujian.
     Analisis setiap pertanyaan beserta opsi jawaban yang disediakan. Pilih jawaban yang paling tepat.
     Kembalikan HANYA format JSON valid list objek murni:
     [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
     """
 
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=system_instruction,
-        generation_config={"response_mime_type": "application/json"},
-    )
+  # Daftar model prioritas jika salah satu model tidak tersedia di versi API tertentu
+  candidate_models = [
+      "gemini-2.5-flash",
+      "gemini-flash-latest",
+      "gemini-pro",
+  ]
 
-    response = model.generate_content(json.dumps(payload))
-    return json.loads(response.text)
+  last_error = None
+  for model_name in candidate_models:
+    try:
+      model = genai.GenerativeModel(
+          model_name=model_name,
+          system_instruction=system_instruction,
+          generation_config={"response_mime_type": "application/json"},
+      )
+      response = model.generate_content(json.dumps(payload))
+      return json.loads(response.text)
+    except Exception as e:
+      last_error = e
+      continue
+
+  raise last_error
 
 
 # ==========================================
