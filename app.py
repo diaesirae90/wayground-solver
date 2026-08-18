@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 import google.generativeai as genai
 import streamlit as st
 
@@ -10,8 +11,8 @@ st.set_page_config(
     layout="centered"
 )
 
-st.title("⚡ Instant Quiz Solver (Ultra Fast Stream)")
-st.caption("Solusi latensi ultra-rendah: Jawaban langsung mengalir secara real-time.")
+st.title("⚡ Instant Quiz Solver (Live Progress)")
+st.caption("Solusi Cepat dengan Pemantauan Proses Nyata & Real-Time Streaming.")
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
@@ -101,7 +102,7 @@ raw_json_input = st.text_area(
     height=240,
 )
 
-if st.button("⚡ Dapatkan Jawaban Instan (Streaming)", type="primary", use_container_width=True):
+if st.button("⚡ Dapatkan Jawaban Instan (Live Progress)", type="primary", use_container_width=True):
     api_key = api_key_input.strip()
 
     if not api_key:
@@ -109,17 +110,32 @@ if st.button("⚡ Dapatkan Jawaban Instan (Streaming)", type="primary", use_cont
     elif not raw_json_input.strip():
         st.warning("⚠️ Silakan tempelkan data JSON kuis terlebih dahulu.")
     else:
+        # Container indikator progress visual
+        progress_bar = st.progress(0)
+        status_box = st.status("🚀 Memulai proses penjawab kuis...", expanded=True)
+
         try:
+            # Langkah 1: Parsing JSON
+            status_box.write("🔍 **Langkah 1/4:** Membaca & memvalidasi struktur JSON...")
+            progress_bar.progress(15)
             parsed_data = json.loads(raw_json_input)
+
+            # Langkah 2: Ekstraksi Soal & Opsi
+            status_box.write("📦 **Langkah 2/4:** Mengekstrak seluruh daftar soal & pilihan jawaban...")
+            progress_bar.progress(35)
             quiz_name, questions_payload = extract_questions_universal(parsed_data)
 
             if not questions_payload:
+                progress_bar.empty()
+                status_box.update(label="❌ Gagal mengekstrak soal", state="error")
                 st.error("Daftar pertanyaan tidak ditemukan di dalam JSON.")
             else:
-                st.success(f"📌 **{quiz_name}** — {len(questions_payload)} Soal Terdeteksi")
-                st.divider()
+                total_soal = len(questions_payload)
+                status_box.write(f"✅ Berhasil mengekstrak **{total_soal} soal** dari kuis *'{quiz_name}'*.")
+                progress_bar.progress(55)
 
-                # Buat format prompt teks ultra ringkas
+                # Langkah 3: Menyiapkan Prompt & Konfigurasi AI
+                status_box.write("🧠 **Langkah 3/4:** Menghubungkan ke Gemini 2.5 Flash API...")
                 prompt_lines = [
                     "Jawab kuis berikut dengan format nomor urut, tuliskan pertanyaan ringkas dan kunci jawaban yang paling tepat secara langsung.\n"
                 ]
@@ -135,13 +151,31 @@ if st.button("⚡ Dapatkan Jawaban Instan (Streaming)", type="primary", use_cont
                     system_instruction="Kamu adalah asisten penjawab ujian kilat. Berikan format jawaban langsung per nomor dengan jelas dan tegas."
                 )
 
-                # Eksekusi streaming langsung ke layar
+                progress_bar.progress(75)
+                status_box.write("⚡ **Langkah 4/4:** AI sedang menganalisis soal & menyusun kunci jawaban...")
+
+                # Mulai streaming ke response
                 response = model.generate_content(full_prompt, stream=True)
-                
-                output_container = st.empty()
-                st.write_stream(chunk.text for chunk in response)
+
+                progress_bar.progress(100)
+                status_box.update(label=f"✅ Selesai! Menampilkan {total_soal} Jawaban", state="complete", expanded=False)
+
+                st.success(f"📌 **{quiz_name}** — {total_soal} Soal Terjawab")
+                st.divider()
+
+                # Stream jawaban mengalir langsung ke layar per chunk
+                def stream_chunks():
+                    for chunk in response:
+                        if chunk.text:
+                            yield chunk.text
+
+                st.write_stream(stream_chunks())
 
         except json.JSONDecodeError:
+            progress_bar.empty()
+            status_box.update(label="❌ Format JSON Tidak Valid", state="error")
             st.error("Format teks bukan JSON yang valid. Pastikan seluruh teks JSON tersalin utuh.")
         except Exception as e:
+            progress_bar.empty()
+            status_box.update(label="❌ Terjadi Kesalahan", state="error")
             st.error(f"Gagal memproses kuis: {e}")
