@@ -1,101 +1,153 @@
 import json
 import os
 import re
+import urllib.parse
 import google.generativeai as genai
+import requests
 import streamlit as st
 
-st.set_page_config(page_title="Quiz JSON Parser", page_icon="🧩", layout="centered")
+st.set_page_config(page_title="Quiz Solver App", page_icon="📝", layout="centered")
 
-st.title("🧩 Quiz JSON Parser & AI Solver")
-st.caption("Paste langsung respon JSON dari request 'rejoin', 'join', atau DevTools Network.")
+st.title("📝 Quiz Solver (PIN, Link & JSON)")
+st.caption(
+    "Mendukung Input Game PIN / Link Kuis langsung & Mode Cadangan Paste JSON."
+)
 
 with st.sidebar:
-    st.header("⚙️ Pengaturan")
-    api_key_input = st.text_input(
-        "Gemini API Key",
-        value=os.getenv("GEMINI_API_KEY", ""),
-        type="password",
-        help="Masukkan Google Gemini API Key Anda.",
-    )
+  st.header("⚙️ Pengaturan")
+  api_key_input = st.text_input(
+      "Gemini API Key",
+      value=os.getenv("GEMINI_API_KEY", ""),
+      type="password",
+      help="Masukkan Google Gemini API Key Anda.",
+  )
 
 
 def clean_text(raw_html: str) -> str:
-    if not raw_html:
-        return ""
-    text = re.sub(r"<.*?>", "", str(raw_html))
-    return text.strip()
+  if not raw_html:
+    return ""
+  text = re.sub(r"<.*?>", "", str(raw_html))
+  return text.strip()
 
 
-def extract_questions_from_json(data: dict) -> tuple:
-    """
-    Mengekstrak list pertanyaan dari berbagai format JSON Quizizz / Wayground.
-    Mengembalikan (nama_kuis, list_soal_terformat)
-    """
-    raw_questions = None
-    quiz_name = "Kuis Tanpa Nama"
+def parse_clean_code(raw_input: str) -> str:
+  text = raw_input.strip()
+  while "%" in text:
+    new_text = urllib.parse.unquote(text)
+    if new_text == text:
+      break
+    text = new_text
 
-    # 1. Format Rejoin: data.data.room
-    if "data" in data and isinstance(data["data"], dict):
-        d_room = data["data"].get("room", {})
-        if "questions" in d_room:
-            raw_questions = d_room.get("questions")
-            quiz_name = d_room.get("name", quiz_name)
-        elif "quizzes" in data["data"] and data["data"]["quizzes"]:
-            first_key = next(iter(data["data"]["quizzes"]))
-            raw_questions = data["data"]["quizzes"][first_key].get("questions")
-            quiz_name = data["data"]["quizzes"][first_key].get("info", {}).get("name", quiz_name)
-        elif "quiz" in data["data"]:
-            raw_questions = data["data"].get("quiz", {}).get("info", {}).get("questions")
-            quiz_name = data["data"].get("quiz", {}).get("info", {}).get("name", quiz_name)
+  # Tangkap parameter gc= (Game Code)
+  match_gc = re.search(r"gc=([0-9a-zA-Z]+)", text)
+  if match_gc:
+    return match_gc.group(1)
 
-    # 2. Format Join Standar: data.room
-    elif "room" in data and isinstance(data["room"], dict):
-        raw_questions = data["room"].get("questions")
-        quiz_name = data["room"].get("name", quiz_name)
+  # Tangkap 6-8 digit angka PIN murni
+  match_pin = re.search(r"\b(\d{6,8})\b", text)
+  if match_pin:
+    return match_pin.group(1)
 
-    # 3. Format langsung data.questions
-    elif "questions" in data:
-        raw_questions = data["questions"]
+  # Tangkap link join path
+  match_game = re.search(r"/join/game/([^?&#]+)", text)
+  if match_game:
+    return match_game.group(1)
 
-    # 4. Format list array langsung
-    elif isinstance(data, list):
-        raw_questions = data
+  return text
 
-    if not raw_questions:
-        raise ValueError("Struktur pertanyaan ('questions') tidak ditemukan dalam JSON.")
 
-    cleaned_payload = []
-    iterator = raw_questions.items() if isinstance(raw_questions, dict) else enumerate(raw_questions)
+def fetch_questions_from_api(raw_input: str) -> tuple:
+  code = parse_clean_code(raw_input)
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+          " like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      ),
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/plain, */*",
+      "Origin": "https://wayground.com",
+      "Referer": "https://wayground.com/join",
+  }
 
-    for q_id, q_data in iterator:
-        structure = q_data.get("structure", {})
-        
-        # Ekstrak Teks Pertanyaan
-        query_text = clean_text(structure.get("query", {}).get("text", "") or q_data.get("question", ""))
-        
-        # Ekstrak Opsi Jawaban (Termasuk Teks dan Gambar)
-        raw_options = structure.get("options", []) or q_data.get("options", [])
-        options = []
-        for idx, opt in enumerate(raw_options, 1):
-            opt_id = opt.get("id") or opt.get("_id") or str(idx)
-            opt_text = clean_text(opt.get("text", ""))
-            
-            # Jika opsi berupa gambar tanpa teks
-            if not opt_text and opt.get("media"):
-                media_url = opt.get("media", [{}])[0].get("url", "")
-                opt_text = f"[Opsi Gambar: {media_url}]"
-            
-            if opt_text:
-                options.append({"id": opt_id, "text": opt_text})
+  domains = ["https://wayground.com", "https://quizizz.com"]
 
-        if query_text:
-            cleaned_payload.append({
-                "id": str(q_id),
-                "question": query_text,
-                "options": options
-            })
+  # 1. Cek Room via checkRoom menggunakan Game PIN / Code
+  for domain in domains:
+    try:
+      res = requests.post(
+          f"{domain}/play-api/v5/checkRoom",
+          json={"roomCode": code},
+          headers=headers,
+          timeout=10,
+      )
+      if res.status_code == 200:
+        data = res.json()
+        room = data.get("room", {})
+        quiz_name = room.get("name", "Kuis Live")
 
-    return quiz_name, cleaned_payload
+        # Jika questions langsung tersedia di room
+        if "questions" in room and room["questions"]:
+          return quiz_name, room["questions"]
+
+        # Jika ada hash room, ambil via _gameapi
+        room_hash = room.get("hash")
+        if room_hash:
+          g_res = requests.get(
+              f"{domain}/_gameapi/main/public/v1/students/games/{room_hash}",
+              headers=headers,
+              timeout=10,
+          )
+          if g_res.status_code == 200:
+            g_data = g_res.json()
+            quizzes = g_data.get("data", {}).get("quizzes", {})
+            if quizzes:
+              first_key = next(iter(quizzes))
+              return (
+                  quizzes[first_key].get("info", {}).get("name", quiz_name),
+                  quizzes[first_key].get("questions", {}),
+              )
+    except Exception:
+      continue
+
+  raise ValueError(
+      f"Kuis dengan PIN '{code}' tidak ditemukan atau sesi room belum dimulai"
+      " oleh host."
+  )
+
+
+def parse_questions_dict(raw_questions: dict, quiz_name: str = "Kuis") -> list:
+  cleaned_payload = []
+  iterator = (
+      raw_questions.items()
+      if isinstance(raw_questions, dict)
+      else enumerate(raw_questions)
+  )
+
+  for q_id, q_data in iterator:
+    structure = q_data.get("structure", {})
+    query_text = clean_text(
+        structure.get("query", {}).get("text", "") or q_data.get("question", "")
+    )
+    raw_options = structure.get("options", []) or q_data.get("options", [])
+
+    options = []
+    for idx, opt in enumerate(raw_options, 1):
+      opt_id = opt.get("id") or opt.get("_id") or str(idx)
+      opt_text = clean_text(opt.get("text", ""))
+
+      if not opt_text and opt.get("media"):
+        media_url = opt.get("media", [{}])[0].get("url", "")
+        opt_text = f"[Opsi Gambar: {media_url}]"
+
+      if opt_text:
+        options.append({"id": opt_id, "text": opt_text})
+
+    if query_text:
+      cleaned_payload.append(
+          {"id": str(q_id), "question": query_text, "options": options}
+      )
+
+  return cleaned_payload
 
 
 def solve_quiz_with_ai(payload: list, key: str) -> list:
@@ -103,19 +155,15 @@ def solve_quiz_with_ai(payload: list, key: str) -> list:
 
   system_instruction = """
     Kamu adalah asisten penjawab kuis dan ujian.
-    Analisis setiap pertanyaan beserta opsi jawaban yang disediakan. Pilih jawaban yang paling tepat.
+    Analisis setiap pertanyaan dan pilih opsi jawaban yang paling tepat.
     Kembalikan HANYA format JSON valid list objek murni:
     [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
     """
 
-  # Daftar model prioritas jika salah satu model tidak tersedia di versi API tertentu
-  candidate_models = [
-      "gemini-2.5-flash",
-      "gemini-flash-latest",
-      "gemini-pro",
-  ]
+  # Fallback model jika versi API berbeda
+  candidate_models = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-pro"]
+  last_err = None
 
-  last_error = None
   for model_name in candidate_models:
     try:
       model = genai.GenerativeModel(
@@ -126,47 +174,105 @@ def solve_quiz_with_ai(payload: list, key: str) -> list:
       response = model.generate_content(json.dumps(payload))
       return json.loads(response.text)
     except Exception as e:
-      last_error = e
+      last_err = e
       continue
 
-  raise last_error
+  raise last_err
 
 
 # ==========================================
-# Tampilan Input Streamlit
+# UI Streamlit (Tab Pilihan Input)
 # ==========================================
-raw_json_input = st.text_area(
-    "Paste Respon JSON Lengkap di Sini:",
-    placeholder='Contoh:\n{\n  "success": true,\n  "data": {\n    "room": {\n      "questions": { ... }\n    }\n  }\n}',
-    height=260,
-)
+tab1, tab2 = st.tabs(["🔗 Input PIN / Link Kuis", "📋 Paste JSON (Cadangan)"])
 
-if st.button("Proses & Dapatkan Jawaban AI", type="primary", use_container_width=True):
-    api_key = api_key_input.strip()
+with tab1:
+  user_input_link = st.text_input(
+      "Game PIN atau Link Join:",
+      value="https://wayground.com/join?gc=052116&source=liveDashboard",
+      placeholder="Masukkan PIN (contoh: 052116) atau link join...",
+  )
+  btn_link = st.button(
+      "Dapatkan Jawaban (By Link/PIN)",
+      type="primary",
+      use_container_width=True,
+      key="btn_link",
+  )
 
-    if not api_key:
-        st.error("⚠️ Masukkan Gemini API Key di sidebar sebelah kiri.")
-    elif not raw_json_input.strip():
-        st.warning("⚠️ Silakan tempelkan data JSON terlebih dahulu.")
-    else:
-        with st.spinner("Mengekstrak pertanyaan & memproses kunci jawaban AI..."):
-            try:
-                parsed_data = json.loads(raw_json_input)
-                quiz_name, questions_payload = extract_questions_from_json(parsed_data)
+with tab2:
+  user_input_json = st.text_area(
+      "Paste Respon JSON DevTools:",
+      placeholder='{"data": {"room": {"questions": {...}}}}',
+      height=200,
+  )
+  btn_json = st.button(
+      "Proses JSON", type="primary", use_container_width=True, key="btn_json"
+  )
 
-                if not questions_payload:
-                    st.error("Gagal mendeteksi daftar soal dari JSON tersebut.")
-                else:
-                    results = solve_quiz_with_ai(questions_payload, api_key)
-                    
-                    st.success(f"📌 **{quiz_name}** ({len(results)} Soal Ditemukan)")
-                    st.divider()
+# Eksekusi Tab 1 (Link/PIN)
+if btn_link:
+  api_key = api_key_input.strip()
+  if not api_key:
+    st.error("⚠️ Masukkan Gemini API Key di sidebar.")
+  elif not user_input_link.strip():
+    st.warning("⚠️ Masukkan PIN atau Link terlebih dahulu.")
+  else:
+    with st.spinner("Mengambil bank soal dari server & memproses jawaban..."):
+      try:
+        q_name, raw_q = fetch_questions_from_api(user_input_link)
+        payload = parse_questions_dict(raw_q, q_name)
 
-                    for idx, item in enumerate(results, 1):
-                        with st.expander(f"**{idx}. {item.get('question')}**", expanded=True):
-                            st.markdown(f"**Jawaban:** :green[**{item.get('answer')}**]")
+        results = solve_quiz_with_ai(payload, api_key)
+        st.success(f"📌 **{q_name}** ({len(results)} Soal Ditemukan)")
+        st.divider()
 
-            except json.JSONDecodeError:
-                st.error("Format teks yang ditempel bukan JSON yang valid. Pastikan semua teks tersalin utuh.")
-            except Exception as e:
-                st.error(f"Gagal memproses kuis: {e}")
+        for idx, item in enumerate(results, 1):
+          with st.expander(
+              f"**{idx}. {item.get('question')}**", expanded=True
+          ):
+            st.markdown(f"**Jawaban:** :green[**{item.get('answer')}**]")
+      except Exception as e:
+        st.error(f"Gagal mengambil kuis via link/PIN: {e}")
+        st.info(
+            "💡 Jika sesi live dikunci host sebelum mulai, gunakan Tab 'Paste"
+            " JSON (Cadangan)'."
+        )
+
+# Eksekusi Tab 2 (JSON Paste)
+if btn_json:
+  api_key = api_key_input.strip()
+  if not api_key:
+    st.error("⚠️ Masukkan Gemini API Key di sidebar.")
+  elif not user_input_json.strip():
+    st.warning("⚠️ Paste data JSON terlebih dahulu.")
+  else:
+    with st.spinner("Mengekstrak JSON & memproses jawaban..."):
+      try:
+        data = json.loads(user_input_json)
+        # Ekstrak questions dari struktur data
+        raw_q = (
+            data.get("data", {}).get("room", {}).get("questions")
+            or data.get("room", {}).get("questions")
+            or data.get("questions")
+        )
+        q_name = (
+            data.get("data", {}).get("room", {}).get("name")
+            or data.get("room", {}).get("name")
+            or "Kuis"
+        )
+
+        if not raw_q:
+          st.error("Struktur 'questions' tidak ditemukan dalam JSON.")
+        else:
+          payload = parse_questions_dict(raw_q, q_name)
+          results = solve_quiz_with_ai(payload, api_key)
+
+          st.success(f"📌 **{q_name}** ({len(results)} Soal Ditemukan)")
+          st.divider()
+
+          for idx, item in enumerate(results, 1):
+            with st.expander(
+                f"**{idx}. {item.get('question')}**", expanded=True
+            ):
+              st.markdown(f"**Jawaban:** :green[**{item.get('answer')}**]")
+      except Exception as e:
+        st.error(f"Gagal memproses JSON: {e}")
