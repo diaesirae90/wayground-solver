@@ -94,29 +94,36 @@ def extract_questions_from_json(data: dict) -> tuple:
 def solve_quiz_with_ai(payload: list, key: str) -> list:
   genai.configure(api_key=key)
 
-  # Kompres payload hanya menjadi string teks ringkas agar proses AI super cepat
-  simplified_prompt = "Pilih kunci jawaban yang benar untuk setiap pertanyaan berikut:\n\n"
-  for idx, q in enumerate(payload, 1):
-    simplified_prompt += f"{idx}. {q['question']}\n"
-    for opt in q['options']:
-      simplified_prompt += f"   - {opt['text']}\n"
-    simplified_prompt += "\n"
-
-  system_instruction = """
-    Kamu adalah asisten penjawab ujian kilat.
-    Analisis soal dan tentukan jawaban paling tepat dari pilihan yang tersedia.
-    Kembalikan HANYA format JSON valid list objek:
-    [{"question": "teks pertanyaan ringkas", "answer": "jawaban yang benar"}]
-    """
-
   model = genai.GenerativeModel(
       model_name="gemini-2.5-flash",
-      system_instruction=system_instruction,
+      system_instruction=(
+          "Kamu adalah asisten penjawab kuis cepat. Jawab setiap soal dengan"
+          " tepat. Kembalikan HANYA JSON list: [{\"question\": \"teks"
+          " ringkas\", \"answer\": \"jawaban\"}]"
+      ),
       generation_config={"response_mime_type": "application/json"},
   )
 
-  response = model.generate_content(simplified_prompt)
-  return json.loads(response.text)
+  results = []
+  # Bagi soal per batch (10 soal per pemanggilan AI)
+  batch_size = 10
+  for i in range(0, len(payload), batch_size):
+    batch = payload[i : i + batch_size]
+    simplified_prompt = "Jawab soal berikut secara tepat:\n\n"
+    for idx, q in enumerate(batch, 1):
+      simplified_prompt += f"{idx}. {q['question']}\n"
+      for opt in q["options"]:
+        simplified_prompt += f"   - {opt['text']}\n"
+      simplified_prompt += "\n"
+
+    try:
+      response = model.generate_content(simplified_prompt)
+      parsed_batch = json.loads(response.text)
+      results.extend(parsed_batch)
+    except Exception:
+      continue
+
+  return results
 
 
 # ==========================================
