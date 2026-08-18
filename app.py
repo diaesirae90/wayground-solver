@@ -141,7 +141,7 @@ if st.button(
 
           # Model gemini-2.5-flash-lite (sama seperti userscript)
           model = genai.GenerativeModel(
-              model_name="gemini-2.5-flash-lite",
+              model_name="gemini-flash-lite-latest",
               generation_config={
                   "response_mime_type": "application/json",
                   "temperature": 0.1,
