@@ -4,10 +4,10 @@ import re
 import google.generativeai as genai
 import streamlit as st
 
-st.set_page_config(page_title="Quiz JSON Solver", page_icon="📝", layout="centered")
+st.set_page_config(page_title="Quiz Solver Kilat", page_icon="⚡", layout="centered")
 
-st.title("📝 Quiz JSON Solver (Via Bookmarklet)")
-st.caption("Cukup jalankan Bookmarklet di browser kuis, lalu tempel (Paste) JSON-nya di bawah ini.")
+st.title("⚡ Quiz Solver (Super Cepat)")
+st.caption("Optimasi Latensi Rendah: Mampu memproses 50+ soal dalam hitungan detik.")
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
@@ -22,15 +22,17 @@ with st.sidebar:
 def clean_text(raw_html: str) -> str:
     if not raw_html:
         return ""
-    return re.sub(r"<.*?>", "", str(raw_html)).strip()
+    # Hapus tag HTML & spasi berlebih
+    text = re.sub(r"<.*?>", "", str(raw_html))
+    return " ".join(text.split()).strip()
 
 
 def extract_questions_from_json(data: dict) -> tuple:
-    """Mengekstrak list pertanyaan dari berbagai format JSON hasil sadapan."""
+    """Mengekstrak list pertanyaan dari berbagai format JSON Quizizz / Wayground."""
     raw_questions = None
     quiz_name = "Kuis Wayground / Quizizz"
 
-    # 1. Format Rejoin: data.data.room
+    # 1. Format Rejoin / Check: data.data.room
     if "data" in data and isinstance(data["data"], dict):
         d_room = data["data"].get("room", {})
         if "questions" in d_room:
@@ -58,7 +60,7 @@ def extract_questions_from_json(data: dict) -> tuple:
         raw_questions = data
 
     if not raw_questions:
-        raise ValueError("Struktur pertanyaan ('questions') tidak ditemukan dalam JSON.")
+        raise ValueError("Struktur 'questions' tidak ditemukan dalam JSON.")
 
     cleaned_payload = []
     iterator = raw_questions.items() if isinstance(raw_questions, dict) else enumerate(raw_questions)
@@ -70,20 +72,18 @@ def extract_questions_from_json(data: dict) -> tuple:
 
         options = []
         for idx, opt in enumerate(raw_options, 1):
-            opt_id = opt.get("id") or opt.get("_id") or str(idx)
             opt_text = clean_text(opt.get("text", ""))
 
             # Handle pilihan gambar
             if not opt_text and opt.get("media"):
                 media_url = opt.get("media", [{}])[0].get("url", "")
-                opt_text = f"[Opsi Gambar: {media_url}]"
+                opt_text = f"[Gambar: {media_url}]"
 
             if opt_text:
-                options.append({"id": opt_id, "text": opt_text})
+                options.append(opt_text)
 
         if query_text:
             cleaned_payload.append({
-                "id": str(q_id),
                 "question": query_text,
                 "options": options
             })
@@ -91,69 +91,64 @@ def extract_questions_from_json(data: dict) -> tuple:
     return quiz_name, cleaned_payload
 
 
-def solve_quiz_with_ai(payload: list, key: str) -> list:
-  genai.configure(api_key=key)
+def solve_quiz_fast(payload: list, key: str) -> list:
+    """Menggunakan format prompt teks ringkas agar inferensi AI berlangsung sangat cepat."""
+    genai.configure(api_key=key)
 
-  model = genai.GenerativeModel(
-      model_name="gemini-2.5-flash",
-      system_instruction=(
-          "Kamu adalah asisten penjawab kuis cepat. Jawab setiap soal dengan"
-          " tepat. Kembalikan HANYA JSON list: [{\"question\": \"teks"
-          " ringkas\", \"answer\": \"jawaban\"}]"
-      ),
-      generation_config={"response_mime_type": "application/json"},
-  )
+    # Format teks super padat agar token hemat & respons instan
+    prompt_lines = ["Jawab kuis pilihan ganda berikut secara singkat dan tepat:\n"]
+    for idx, item in enumerate(payload, 1):
+        opts_str = " | ".join(item["options"]) if item["options"] else "Tanpa Opsi"
+        prompt_lines.append(f"{idx}. {item['question']}\nPilihan: {opts_str}\n")
 
-  results = []
-  # Bagi soal per batch (10 soal per pemanggilan AI)
-  batch_size = 10
-  for i in range(0, len(payload), batch_size):
-    batch = payload[i : i + batch_size]
-    simplified_prompt = "Jawab soal berikut secara tepat:\n\n"
-    for idx, q in enumerate(batch, 1):
-      simplified_prompt += f"{idx}. {q['question']}\n"
-      for opt in q["options"]:
-        simplified_prompt += f"   - {opt['text']}\n"
-      simplified_prompt += "\n"
+    full_prompt = "\n".join(prompt_lines)
 
-    try:
-      response = model.generate_content(simplified_prompt)
-      parsed_batch = json.loads(response.text)
-      results.extend(parsed_batch)
-    except Exception:
-      continue
+    system_instruction = """
+    Kamu adalah asisten penjawab ujian kilat.
+    Tentukan jawaban yang paling benar dari pilihan yang diberikan.
+    Format respon WAJIB HANYA berupa JSON valid list:
+    [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
+    """
 
-  return results
+    # Menggunakan model tercepat
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction=system_instruction,
+        generation_config={"response_mime_type": "application/json", "temperature": 0.1},
+    )
+
+    response = model.generate_content(full_prompt)
+    return json.loads(response.text)
 
 
 # ==========================================
 # UI Streamlit
 # ==========================================
 raw_json_input = st.text_area(
-    "Paste JSON Hasil Bookmarklet di Sini:",
-    placeholder='Tekan Ctrl + V di sini setelah menjalankan bookmarklet di kuis...',
-    height=240,
+    "Paste Respon JSON Kuis di Sini:",
+    placeholder='{"room": {"name": "...", "questions": { ... }}}',
+    height=250,
 )
 
-if st.button("Proses & Dapatkan Jawaban AI", type="primary", use_container_width=True):
+if st.button("⚡ Proses Jawaban Kilat", type="primary", use_container_width=True):
     api_key = api_key_input.strip()
 
     if not api_key:
         st.error("⚠️ Masukkan Gemini API Key di sidebar sebelah kiri.")
     elif not raw_json_input.strip():
-        st.warning("⚠️ Silakan tempelkan (Paste) data JSON terlebih dahulu.")
+        st.warning("⚠️ Silakan tempelkan data JSON kuis terlebih dahulu.")
     else:
-        with st.spinner("Mengekstrak soal & memproses kunci jawaban AI..."):
+        with st.spinner("Menganalisis soal & memproses kunci jawaban..."):
             try:
                 parsed_data = json.loads(raw_json_input)
                 quiz_name, questions_payload = extract_questions_from_json(parsed_data)
 
                 if not questions_payload:
-                    st.error("Gagal mendeteksi daftar soal dari JSON.")
+                    st.error("Daftar pertanyaan tidak ditemukan dalam JSON.")
                 else:
-                    results = solve_quiz_with_ai(questions_payload, api_key)
+                    results = solve_quiz_fast(questions_payload, api_key)
                     
-                    st.success(f"📌 **{quiz_name}** ({len(results)} Soal Berhasil Dijawab)")
+                    st.success(f"📌 **{quiz_name}** — {len(results)} Soal Berhasil Dijawab!")
                     st.divider()
 
                     for idx, item in enumerate(results, 1):
@@ -161,6 +156,6 @@ if st.button("Proses & Dapatkan Jawaban AI", type="primary", use_container_width
                             st.markdown(f"**Jawaban:** :green[**{item.get('answer')}**]")
 
             except json.JSONDecodeError:
-                st.error("Format teks bukan JSON yang valid. Pastikan menyalin semua teks hasil bookmarklet.")
+                st.error("Format teks bukan JSON yang valid. Pastikan semua teks tersalin utuh.")
             except Exception as e:
                 st.error(f"Gagal memproses kuis: {e}")
