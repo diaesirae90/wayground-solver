@@ -92,32 +92,31 @@ def extract_questions_from_json(data: dict) -> tuple:
 
 
 def solve_quiz_with_ai(payload: list, key: str) -> list:
-    genai.configure(api_key=key)
+  genai.configure(api_key=key)
 
-    system_instruction = """
-    Kamu adalah asisten penjawab kuis dan ujian pilihan ganda / isian.
-    Analisis setiap pertanyaan dan tentukan opsi jawaban yang paling tepat.
-    Kembalikan HANYA format JSON valid list objek murni:
-    [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
+  # Kompres payload hanya menjadi string teks ringkas agar proses AI super cepat
+  simplified_prompt = "Pilih kunci jawaban yang benar untuk setiap pertanyaan berikut:\n\n"
+  for idx, q in enumerate(payload, 1):
+    simplified_prompt += f"{idx}. {q['question']}\n"
+    for opt in q['options']:
+      simplified_prompt += f"   - {opt['text']}\n"
+    simplified_prompt += "\n"
+
+  system_instruction = """
+    Kamu adalah asisten penjawab ujian kilat.
+    Analisis soal dan tentukan jawaban paling tepat dari pilihan yang tersedia.
+    Kembalikan HANYA format JSON valid list objek:
+    [{"question": "teks pertanyaan ringkas", "answer": "jawaban yang benar"}]
     """
 
-    candidate_models = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-pro"]
-    last_err = None
+  model = genai.GenerativeModel(
+      model_name="gemini-2.5-flash",
+      system_instruction=system_instruction,
+      generation_config={"response_mime_type": "application/json"},
+  )
 
-    for model_name in candidate_models:
-        try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=system_instruction,
-                generation_config={"response_mime_type": "application/json"},
-            )
-            response = model.generate_content(json.dumps(payload))
-            return json.loads(response.text)
-        except Exception as e:
-            last_err = e
-            continue
-
-    raise last_err
+  response = model.generate_content(simplified_prompt)
+  return json.loads(response.text)
 
 
 # ==========================================
