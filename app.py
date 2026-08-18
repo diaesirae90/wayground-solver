@@ -28,67 +28,97 @@ def clean_text(raw_html: str) -> str:
 
 
 def extract_questions_from_json(data: dict) -> tuple:
-    """Mengekstrak list pertanyaan dari berbagai format JSON Quizizz / Wayground."""
-    raw_questions = None
-    quiz_name = "Kuis Wayground / Quizizz"
+  """Mengekstrak list pertanyaan dari berbagai format JSON Quizizz / Wayground."""
+  raw_questions = None
+  quiz_name = "Kuis Wayground / Quizizz"
 
-    # 1. Format Rejoin / Check: data.data.room
-    if "data" in data and isinstance(data["data"], dict):
-        d_room = data["data"].get("room", {})
-        if "questions" in d_room:
-            raw_questions = d_room.get("questions")
-            quiz_name = d_room.get("name", quiz_name)
-        elif "quizzes" in data["data"] and data["data"]["quizzes"]:
-            first_key = next(iter(data["data"]["quizzes"]))
-            raw_questions = data["data"]["quizzes"][first_key].get("questions")
-            quiz_name = data["data"]["quizzes"][first_key].get("info", {}).get("name", quiz_name)
-        elif "quiz" in data["data"]:
-            raw_questions = data["data"].get("quiz", {}).get("info", {}).get("questions")
-            quiz_name = data["data"].get("quiz", {}).get("info", {}).get("name", quiz_name)
+  # 1. Format Rejoin / Check: data.data.room
+  if "data" in data and isinstance(data["data"], dict):
+    d_room = data["data"].get("room", {})
+    if "questions" in d_room:
+      raw_questions = d_room.get("questions")
+      quiz_name = d_room.get("name", quiz_name)
+    elif "quizzes" in data["data"] and data["data"]["quizzes"]:
+      first_key = next(iter(data["data"]["quizzes"]))
+      raw_questions = data["data"]["quizzes"][first_key].get("questions")
+      quiz_name = data["data"]["quizzes"][first_key].get(
+          "info", {}
+      ).get("name", quiz_name)
+    elif "quiz" in data["data"]:
+      raw_questions = (
+          data["data"].get("quiz", {}).get("info", {}).get("questions")
+      )
+      quiz_name = (
+          data["data"].get("quiz", {}).get("info", {}).get("name", quiz_name)
+      )
 
-    # 2. Format Join Standar: data.room
-    elif "room" in data and isinstance(data["room"], dict):
-        raw_questions = data["room"].get("questions")
-        quiz_name = data["room"].get("name", quiz_name)
+  # 2. Format Join Standar: data.room
+  elif "room" in data and isinstance(data["room"], dict):
+    raw_questions = data["room"].get("questions")
+    quiz_name = data["room"].get("name", quiz_name)
 
-    # 3. Format langsung data.questions
-    elif "questions" in data:
-        raw_questions = data["questions"]
+  # 3. Format langsung data.questions
+  elif "questions" in data and data["questions"]:
+    raw_questions = data["questions"]
 
-    # 4. Format list array langsung
-    elif isinstance(data, list):
-        raw_questions = data
+  # 4. Format List Array Attempt (Otomatis Ambil via Game ID)
+  if not raw_questions:
+    game_id = None
+    if isinstance(data, dict):
+      game_id = data.get("gameId") or data.get("data", {}).get("gameId")
+    elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+      game_id = data[0].get("gameId")
 
-    if not raw_questions:
-        raise ValueError("Struktur 'questions' tidak ditemukan dalam JSON.")
+    if game_id:
+      try:
+        g_res = requests.get(
+            f"https://wayground.com/_gameapi/main/public/v1/students/games/{game_id}",
+            timeout=10,
+        )
+        if g_res.status_code == 200:
+          g_data = g_res.json().get("data", {})
+          quizzes = g_data.get("quizzes", {})
+          if quizzes:
+            first_key = next(iter(quizzes))
+            quiz_name = quizzes[first_key].get("info", {}).get("name", quiz_name)
+            raw_questions = quizzes[first_key].get("questions", {})
+      except Exception:
+        pass
 
-    cleaned_payload = []
-    iterator = raw_questions.items() if isinstance(raw_questions, dict) else enumerate(raw_questions)
+  if not raw_questions:
+    raise ValueError(
+        "Struktur 'questions' tidak ditemukan dalam JSON. Pastikan menyalin"
+        " respon dari request 'rejoin' atau 'join'."
+    )
 
-    for q_id, q_data in iterator:
-        structure = q_data.get("structure", {})
-        query_text = clean_text(structure.get("query", {}).get("text", "") or q_data.get("question", ""))
-        raw_options = structure.get("options", []) or q_data.get("options", [])
+  cleaned_payload = []
+  iterator = (
+      raw_questions.items()
+      if isinstance(raw_questions, dict)
+      else enumerate(raw_questions)
+  )
 
-        options = []
-        for idx, opt in enumerate(raw_options, 1):
-            opt_text = clean_text(opt.get("text", ""))
+  for q_id, q_data in iterator:
+    structure = q_data.get("structure", {})
+    query_text = clean_text(
+        structure.get("query", {}).get("text", "") or q_data.get("question", "")
+    )
+    raw_options = structure.get("options", []) or q_data.get("options", [])
 
-            # Handle pilihan gambar
-            if not opt_text and opt.get("media"):
-                media_url = opt.get("media", [{}])[0].get("url", "")
-                opt_text = f"[Gambar: {media_url}]"
+    options = []
+    for idx, opt in enumerate(raw_options, 1):
+      opt_text = clean_text(opt.get("text", ""))
+      if not opt_text and opt.get("media"):
+        media_url = opt.get("media", [{}])[0].get("url", "")
+        opt_text = f"[Gambar: {media_url}]"
 
-            if opt_text:
-                options.append(opt_text)
+      if opt_text:
+        options.append(opt_text)
 
-        if query_text:
-            cleaned_payload.append({
-                "question": query_text,
-                "options": options
-            })
+    if query_text:
+      cleaned_payload.append({"question": query_text, "options": options})
 
-    return quiz_name, cleaned_payload
+  return quiz_name, cleaned_payload
 
 
 def solve_quiz_fast(payload: list, key: str) -> list:
