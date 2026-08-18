@@ -2,13 +2,16 @@ import json
 import os
 import re
 import google.generativeai as genai
-import requests
 import streamlit as st
 
-st.set_page_config(page_title="Quiz Auto-Resolver", page_icon="⚡", layout="centered")
+st.set_page_config(
+    page_title="Instant Quiz Solver",
+    page_icon="⚡",
+    layout="centered"
+)
 
-st.title("⚡ Quiz Auto-Resolver")
-st.caption("Mendukung format JSON Rejoin, Join, maupun Metadata History/Items secara otomatis.")
+st.title("⚡ Instant Quiz Solver (Ultra Fast Stream)")
+st.caption("Solusi latensi ultra-rendah: Jawaban langsung mengalir secara real-time.")
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
@@ -28,14 +31,9 @@ def clean_text(raw_html: str) -> str:
 
 
 def extract_questions_universal(data: dict) -> tuple:
-    """Mengekstrak bank soal dari berbagai format struktur JSON."""
+    """Mengekstrak pertanyaan dan opsi dari berbagai macam format JSON Quizizz / Wayground."""
     raw_questions = None
     quiz_name = "Kuis Wayground / Quizizz"
-    session = requests.Session()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
 
     # 1. Format Rejoin / Check / Room standar
     if isinstance(data, dict):
@@ -59,63 +57,11 @@ def extract_questions_universal(data: dict) -> tuple:
         elif "questions" in data and data["questions"]:
             raw_questions = data["questions"]
 
-    # 2. Format Items / Attempt History: Ekstrak Quiz ID atau Game ID lalu fetch API
-    if not raw_questions:
-        target_quiz_id = None
-        target_game_id = None
-
-        if isinstance(data, dict):
-            # Cek di dalam data.items
-            items = data.get("data", {}).get("items") or data.get("items", [])
-            if isinstance(items, list) and len(items) > 0:
-                first_item = items[0]
-                target_quiz_id = first_item.get("quizId")
-                target_game_id = first_item.get("_id") or first_item.get("gameId")
-            
-            # Cek di dalam data.quizzes
-            quizzes = data.get("data", {}).get("quizzes", {})
-            if isinstance(quizzes, dict) and quizzes:
-                first_q_key = next(iter(quizzes))
-                quiz_name = quizzes[first_q_key].get("name", quiz_name)
-                target_quiz_id = first_q_key
-
-            if not target_quiz_id:
-                target_quiz_id = data.get("quizId")
-            if not target_game_id:
-                target_game_id = data.get("gameId")
-
-        # Tarik data soal via Quiz ID
-        if target_quiz_id:
-            for domain in ["https://wayground.com", "https://quizizz.com"]:
-                try:
-                    res = session.get(f"{domain}/api/main/quiz/{target_quiz_id}", headers=headers, timeout=10)
-                    if res.status_code == 200:
-                        q_data = res.json().get("data", {}).get("quiz", {})
-                        q_list = q_data.get("info", {}).get("questions", [])
-                        quiz_name = q_data.get("info", {}).get("name", quiz_name)
-                        if q_list:
-                            raw_questions = {q.get("_id", str(i)): q for i, q in enumerate(q_list)}
-                            break
-                except Exception:
-                    pass
-
-        # Jika masih belum dapat, tarik via Game ID
-        if not raw_questions and target_game_id:
-            for domain in ["https://wayground.com", "https://quizizz.com"]:
-                try:
-                    res = session.get(f"{domain}/_gameapi/main/public/v1/students/games/{target_game_id}", headers=headers, timeout=10)
-                    if res.status_code == 200:
-                        g_quizzes = res.json().get("data", {}).get("quizzes", {})
-                        if g_quizzes:
-                            f_key = next(iter(g_quizzes))
-                            quiz_name = g_quizzes[f_key].get("info", {}).get("name", quiz_name)
-                            raw_questions = g_quizzes[f_key].get("questions", {})
-                            break
-                except Exception:
-                    pass
+        elif isinstance(data, list):
+            raw_questions = data
 
     if not raw_questions:
-        raise ValueError("Struktur pertanyaan tidak ditemukan dan API Quiz tidak dapat diakses.")
+        raise ValueError("Struktur pertanyaan ('questions') tidak ditemukan dalam JSON.")
 
     cleaned_payload = []
     iterator = raw_questions.items() if isinstance(raw_questions, dict) else enumerate(raw_questions)
@@ -128,6 +74,8 @@ def extract_questions_universal(data: dict) -> tuple:
         options = []
         for idx, opt in enumerate(raw_options, 1):
             opt_text = clean_text(opt.get("text", ""))
+
+            # Tangani jika opsi berupa media gambar
             if not opt_text and opt.get("media"):
                 media_url = opt.get("media", [{}])[0].get("url", "")
                 opt_text = f"[Gambar: {media_url}]"
@@ -136,36 +84,12 @@ def extract_questions_universal(data: dict) -> tuple:
                 options.append(opt_text)
 
         if query_text:
-            cleaned_payload.append({"question": query_text, "options": options})
+            cleaned_payload.append({
+                "question": query_text,
+                "options": options
+            })
 
     return quiz_name, cleaned_payload
-
-
-def solve_quiz_fast(payload: list, key: str) -> list:
-    genai.configure(api_key=key)
-
-    prompt_lines = ["Tentukan kunci jawaban yang paling tepat untuk kuis berikut:\n"]
-    for idx, item in enumerate(payload, 1):
-        opts_str = " | ".join(item["options"]) if item["options"] else "Isian Singkat"
-        prompt_lines.append(f"{idx}. {item['question']}\nPilihan: {opts_str}\n")
-
-    full_prompt = "\n".join(prompt_lines)
-
-    system_instruction = """
-    Kamu adalah asisten penjawab ujian kilat.
-    Tentukan jawaban yang paling benar dari pilihan yang diberikan.
-    Format respon WAJIB HANYA berupa JSON valid list objek murni:
-    [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
-    """
-
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=system_instruction,
-        generation_config={"response_mime_type": "application/json", "temperature": 0.1},
-    )
-
-    response = model.generate_content(full_prompt)
-    return json.loads(response.text)
 
 
 # ==========================================
@@ -173,36 +97,51 @@ def solve_quiz_fast(payload: list, key: str) -> list:
 # ==========================================
 raw_json_input = st.text_area(
     "Paste Respon JSON Kuis di Sini:",
-    placeholder='Paste semua jenis format JSON dari Wayground/Quizizz di sini...',
-    height=250,
+    placeholder='{"room": {"name": "...", "questions": { ... }}}',
+    height=240,
 )
 
-if st.button("⚡ Proses Jawaban Kilat", type="primary", use_container_width=True):
+if st.button("⚡ Dapatkan Jawaban Instan (Streaming)", type="primary", use_container_width=True):
     api_key = api_key_input.strip()
 
     if not api_key:
-        st.error("⚠️ Masukkan Gemini API Key di sidebar.")
+        st.error("⚠️ Masukkan Gemini API Key di sidebar sebelah kiri.")
     elif not raw_json_input.strip():
-        st.warning("⚠️ Masukkan teks JSON kuis terlebih dahulu.")
+        st.warning("⚠️ Silakan tempelkan data JSON kuis terlebih dahulu.")
     else:
-        with st.spinner("Mendeteksi format JSON & memproses kunci jawaban AI..."):
-            try:
-                parsed_data = json.loads(raw_json_input)
-                quiz_name, questions_payload = extract_questions_universal(parsed_data)
+        try:
+            parsed_data = json.loads(raw_json_input)
+            quiz_name, questions_payload = extract_questions_universal(parsed_data)
 
-                if not questions_payload:
-                    st.error("Daftar pertanyaan kosong.")
-                else:
-                    results = solve_quiz_fast(questions_payload, api_key)
+            if not questions_payload:
+                st.error("Daftar pertanyaan tidak ditemukan di dalam JSON.")
+            else:
+                st.success(f"📌 **{quiz_name}** — {len(questions_payload)} Soal Terdeteksi")
+                st.divider()
 
-                    st.success(f"📌 **{quiz_name}** — {len(results)} Soal Berhasil Dijawab!")
-                    st.divider()
+                # Buat format prompt teks ultra ringkas
+                prompt_lines = [
+                    "Jawab kuis berikut dengan format nomor urut, tuliskan pertanyaan ringkas dan kunci jawaban yang paling tepat secara langsung.\n"
+                ]
+                for idx, item in enumerate(questions_payload, 1):
+                    opts_str = " | ".join(item["options"]) if item["options"] else "Isian Singkat"
+                    prompt_lines.append(f"{idx}. {item['question']}\nPilihan: {opts_str}\n")
 
-                    for idx, item in enumerate(results, 1):
-                        with st.expander(f"**{idx}. {item.get('question')}**", expanded=True):
-                            st.markdown(f"**Jawaban:** :green[**{item.get('answer')}**]")
+                full_prompt = "\n".join(prompt_lines)
 
-            except json.JSONDecodeError:
-                st.error("Format teks bukan JSON yang valid.")
-            except Exception as e:
-                st.error(f"Gagal memproses kuis: {e}")
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel(
+                    model_name="gemini-2.5-flash",
+                    system_instruction="Kamu adalah asisten penjawab ujian kilat. Berikan format jawaban langsung per nomor dengan jelas dan tegas."
+                )
+
+                # Eksekusi streaming langsung ke layar
+                response = model.generate_content(full_prompt, stream=True)
+                
+                output_container = st.empty()
+                st.write_stream(chunk.text for chunk in response)
+
+        except json.JSONDecodeError:
+            st.error("Format teks bukan JSON yang valid. Pastikan seluruh teks JSON tersalin utuh.")
+        except Exception as e:
+            st.error(f"Gagal memproses kuis: {e}")
