@@ -1,15 +1,13 @@
 import json
 import os
 import re
-import urllib.parse
 import google.generativeai as genai
-import requests
 import streamlit as st
 
-st.set_page_config(page_title="Quiz Solver with Cookies", page_icon="🍪", layout="centered")
+st.set_page_config(page_title="Quiz JSON Solver", page_icon="📝", layout="centered")
 
-st.title("🍪 Quiz Solver (Link + Cookies)")
-st.caption("Solusi Bypass Proteksi Live: Masukkan Link Kuis & Cookies Sesi Browser.")
+st.title("📝 Quiz JSON Solver (Via Bookmarklet)")
+st.caption("Cukup jalankan Bookmarklet di browser kuis, lalu tempel (Paste) JSON-nya di bawah ini.")
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
@@ -27,137 +25,41 @@ def clean_text(raw_html: str) -> str:
     return re.sub(r"<.*?>", "", str(raw_html)).strip()
 
 
-def parse_clean_code(raw_input: str) -> str:
-    text = raw_input.strip()
-    while "%" in text:
-        new_text = urllib.parse.unquote(text)
-        if new_text == text:
-            break
-        text = new_text
+def extract_questions_from_json(data: dict) -> tuple:
+    """Mengekstrak list pertanyaan dari berbagai format JSON hasil sadapan."""
+    raw_questions = None
+    quiz_name = "Kuis Wayground / Quizizz"
 
-    # 1. Hash 24 karakter hex dari URL rejoin / games
-    match_hex = re.search(r"/games/([a-f0-9]{24})", text)
-    if match_hex:
-        return match_hex.group(1)
+    # 1. Format Rejoin: data.data.room
+    if "data" in data and isinstance(data["data"], dict):
+        d_room = data["data"].get("room", {})
+        if "questions" in d_room:
+            raw_questions = d_room.get("questions")
+            quiz_name = d_room.get("name", quiz_name)
+        elif "quizzes" in data["data"] and data["data"]["quizzes"]:
+            first_key = next(iter(data["data"]["quizzes"]))
+            raw_questions = data["data"]["quizzes"][first_key].get("questions")
+            quiz_name = data["data"]["quizzes"][first_key].get("info", {}).get("name", quiz_name)
+        elif "quiz" in data["data"]:
+            raw_questions = data["data"].get("quiz", {}).get("info", {}).get("questions")
+            quiz_name = data["data"].get("quiz", {}).get("info", {}).get("name", quiz_name)
 
-    # 2. Parameter gc= (Game Code)
-    match_gc = re.search(r"gc=([0-9a-zA-Z]+)", text)
-    if match_gc:
-        return match_gc.group(1)
+    # 2. Format Join Standar: data.room
+    elif "room" in data and isinstance(data["room"], dict):
+        raw_questions = data["room"].get("questions")
+        quiz_name = data["room"].get("name", quiz_name)
 
-    # 3. PIN angka murni 6-8 digit
-    match_pin = re.search(r"\b(\d{6,8})\b", text)
-    if match_pin:
-        return match_pin.group(1)
+    # 3. Format langsung data.questions
+    elif "questions" in data:
+        raw_questions = data["questions"]
 
-    # 4. Token U2Fsd (AES Encrypted)
-    match_salted = re.search(r"(U2FsdGVkX1[A-Za-z0-9+/=]+)", text)
-    if match_salted:
-        return match_salted.group(1)
+    # 4. Format list array langsung
+    elif isinstance(data, list):
+        raw_questions = data
 
-    # 5. Path join game
-    match_game = re.search(r"/join/game/([^?&#]+)", text)
-    if match_game:
-        return match_game.group(1)
+    if not raw_questions:
+        raise ValueError("Struktur pertanyaan ('questions') tidak ditemukan dalam JSON.")
 
-    return text
-
-
-def parse_cookie_string(cookie_raw: str) -> dict:
-    """Mengubah format string cookie mentah menjadi dictionary requests."""
-    cookies = {}
-    if not cookie_raw:
-        return cookies
-
-    for item in cookie_raw.split(";"):
-        if "=" in item:
-            k, v = item.strip().split("=", 1)
-            cookies[k.strip()] = v.strip()
-    return cookies
-
-
-def fetch_quiz_with_cookies(raw_link: str, raw_cookies: str) -> tuple:
-    code = parse_clean_code(raw_link)
-    cookies_dict = parse_cookie_string(raw_cookies)
-    
-    session = requests.Session()
-    
-    # Ambil nilai csrf & uid dari cookie jika ada
-    csrf_token = cookies_dict.get("_csrf") or cookies_dict.get("x-csrf-token", "")
-    uid = cookies_dict.get("quizizz_uid") or cookies_dict.get("suid", "")
-    auth_cookie = cookies_dict.get("_sid", "")
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://wayground.com",
-        "Referer": "https://wayground.com/join",
-    }
-    if csrf_token:
-        headers["x-csrf-token"] = csrf_token
-    if uid:
-        headers["x-quizizz-uid"] = uid
-
-    domains = ["https://wayground.com", "https://quizizz.com"]
-
-    for domain in domains:
-        # Jalur 1: Jika code adalah 24-hex hash (Rejoin Endpoint)
-        if len(code) == 24 and re.match(r"^[a-f0-9]{24}$", code):
-            rejoin_url = f"{domain}/_gameapi/main/public/v1/games/{code}/rejoin"
-            payload = {
-                "roomHash": code,
-                "type": "live",
-                "authCookie": auth_cookie
-            }
-            try:
-                res = session.post(rejoin_url, headers=headers, cookies=cookies_dict, json=payload, timeout=10)
-                if res.status_code == 200:
-                    data = res.json()
-                    room = data.get("data", {}).get("room", {})
-                    if "questions" in room and room["questions"]:
-                        return room.get("name", "Kuis Live"), room["questions"]
-            except Exception:
-                pass
-
-            # Cek endpoint games/{hash}
-            try:
-                g_res = session.get(f"{domain}/_gameapi/main/public/v1/students/games/{code}", headers=headers, cookies=cookies_dict, timeout=10)
-                if g_res.status_code == 200:
-                    g_data = g_res.json().get("data", {})
-                    quizzes = g_data.get("quizzes", {})
-                    if quizzes:
-                        first_key = next(iter(quizzes))
-                        return quizzes[first_key].get("info", {}).get("name", "Kuis Live"), quizzes[first_key].get("questions", {})
-            except Exception:
-                pass
-
-        # Jalur 2: Jika menggunakan PIN / Room Code biasa
-        try:
-            res = session.post(f"{domain}/play-api/v5/checkRoom", json={"roomCode": code}, headers=headers, cookies=cookies_dict, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                room = data.get("room", {})
-                if "questions" in room and room["questions"]:
-                    return room.get("name", "Kuis Live"), room["questions"]
-                
-                room_hash = room.get("hash")
-                if room_hash:
-                    # Ambil via games/{hash} dengan cookies
-                    g_res = session.get(f"{domain}/_gameapi/main/public/v1/students/games/{room_hash}", headers=headers, cookies=cookies_dict, timeout=10)
-                    if g_res.status_code == 200:
-                        g_data = g_res.json().get("data", {})
-                        quizzes = g_data.get("quizzes", {})
-                        if quizzes:
-                            first_key = next(iter(quizzes))
-                            return quizzes[first_key].get("info", {}).get("name", "Kuis Live"), quizzes[first_key].get("questions", {})
-        except Exception:
-            pass
-
-    raise ValueError(f"Tidak dapat menemukan kuis dengan kode '{code}'. Pastikan cookie sesi masih aktif dan tidak expired.")
-
-
-def parse_questions_dict(raw_questions: dict, quiz_name: str = "Kuis") -> list:
     cleaned_payload = []
     iterator = raw_questions.items() if isinstance(raw_questions, dict) else enumerate(raw_questions)
 
@@ -170,6 +72,8 @@ def parse_questions_dict(raw_questions: dict, quiz_name: str = "Kuis") -> list:
         for idx, opt in enumerate(raw_options, 1):
             opt_id = opt.get("id") or opt.get("_id") or str(idx)
             opt_text = clean_text(opt.get("text", ""))
+
+            # Handle pilihan gambar
             if not opt_text and opt.get("media"):
                 media_url = opt.get("media", [{}])[0].get("url", "")
                 opt_text = f"[Opsi Gambar: {media_url}]"
@@ -184,15 +88,15 @@ def parse_questions_dict(raw_questions: dict, quiz_name: str = "Kuis") -> list:
                 "options": options
             })
 
-    return cleaned_payload
+    return quiz_name, cleaned_payload
 
 
 def solve_quiz_with_ai(payload: list, key: str) -> list:
     genai.configure(api_key=key)
 
     system_instruction = """
-    Kamu adalah asisten penjawab kuis dan ujian.
-    Analisis setiap pertanyaan dan pilih opsi jawaban yang paling tepat dari pilihan yang tersedia.
+    Kamu adalah asisten penjawab kuis dan ujian pilihan ganda / isian.
+    Analisis setiap pertanyaan dan tentukan opsi jawaban yang paling tepat.
     Kembalikan HANYA format JSON valid list objek murni:
     [{"question": "teks pertanyaan", "answer": "jawaban yang benar"}]
     """
@@ -217,46 +121,40 @@ def solve_quiz_with_ai(payload: list, key: str) -> list:
 
 
 # ==========================================
-# UI Form Input
+# UI Streamlit
 # ==========================================
-st.subheader("📋 Masukkan Detail Sesi Kuis")
-
-user_link = st.text_input(
-    "1. Link Kuis / PIN / URL Rejoin:",
-    placeholder="Contoh: https://wayground.com/join?gc=20115513 atau URL rejoin..."
+raw_json_input = st.text_area(
+    "Paste JSON Hasil Bookmarklet di Sini:",
+    placeholder='Tekan Ctrl + V di sini setelah menjalankan bookmarklet di kuis...',
+    height=240,
 )
 
-user_cookies = st.text_area(
-    "2. String Cookies dari Browser (Request Headers):",
-    placeholder="quizizz_uid=4465...; _sid=FC8j...; _csrf=sHV-...",
-    height=120,
-    help="Salin isi header 'Cookie' dari DevTools (F12) -> Network pada request kuis."
-)
-
-if st.button("Dapatkan Jawaban Sekarang", type="primary", use_container_width=True):
+if st.button("Proses & Dapatkan Jawaban AI", type="primary", use_container_width=True):
     api_key = api_key_input.strip()
 
     if not api_key:
         st.error("⚠️ Masukkan Gemini API Key di sidebar sebelah kiri.")
-    elif not user_link.strip():
-        st.warning("⚠️ Masukkan link kuis atau PIN terlebih dahulu.")
-    elif not user_cookies.strip():
-        st.warning("⚠️ Masukkan string cookies browser.")
+    elif not raw_json_input.strip():
+        st.warning("⚠️ Silakan tempelkan (Paste) data JSON terlebih dahulu.")
     else:
-        with st.spinner("Mengakses kuis via session cookies & memproses AI..."):
+        with st.spinner("Mengekstrak soal & memproses kunci jawaban AI..."):
             try:
-                q_name, raw_q = fetch_quiz_with_cookies(user_link, user_cookies)
-                payload = parse_questions_dict(raw_q, q_name)
+                parsed_data = json.loads(raw_json_input)
+                quiz_name, questions_payload = extract_questions_from_json(parsed_data)
 
-                if not payload:
-                    st.error("Daftar pertanyaan tidak ditemukan di dalam sesi kuis.")
+                if not questions_payload:
+                    st.error("Gagal mendeteksi daftar soal dari JSON.")
                 else:
-                    results = solve_quiz_with_ai(payload, api_key)
-                    st.success(f"📌 **{q_name}** ({len(results)} Soal Berhasil Dijawab)")
+                    results = solve_quiz_with_ai(questions_payload, api_key)
+                    
+                    st.success(f"📌 **{quiz_name}** ({len(results)} Soal Berhasil Dijawab)")
                     st.divider()
 
                     for idx, item in enumerate(results, 1):
                         with st.expander(f"**{idx}. {item.get('question')}**", expanded=True):
                             st.markdown(f"**Jawaban:** :green[**{item.get('answer')}**]")
+
+            except json.JSONDecodeError:
+                st.error("Format teks bukan JSON yang valid. Pastikan menyalin semua teks hasil bookmarklet.")
             except Exception as e:
                 st.error(f"Gagal memproses kuis: {e}")
